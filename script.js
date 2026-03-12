@@ -13,14 +13,70 @@ document.addEventListener("DOMContentLoaded", () => {
   const mainTitle = document.getElementById("main-title");
   const mainDesc = document.getElementById("main-desc");
 
-  // 上传配置
+  // 上传配置 - 支持多个 IPFS 服务商
   const UPLOAD_CONFIG = {
-    // 直接上传地址（可能会有 CORS 问题）
-    direct: "https://ipfs-relay.crossbell.io/upload",
-    // 代理上传地址（需要在 Cloudflare Workers 部署 worker.js）
-    proxy: "https://ifps-api.261770.xyz",
-    // 当前使用的上传方式: 'direct' 或 'proxy'
-    mode: "direct",
+    // 当前使用的服务商，可选: 'crossbell', 'img2ipfs', 'pinata', 'web3storage', 'proxy'
+    provider: "img2ipfs",
+
+    // 各服务商配置
+    providers: {
+      // Crossbell - 原服务商（可能有 CORS 问题）
+      crossbell: {
+        url: "https://ipfs-relay.crossbell.io/upload",
+        responseHandler: (data) => ({
+          status: data.status === "ok" ? "ok" : "error",
+          url: data.web2url?.replace("ipfs.crossbell.io", "ipfs.tianhw.top"),
+          hash: data.ipfs_hash,
+        }),
+      },
+
+      // Img2IPFS - 免费，无需注册，推荐
+      // 接口文档: https://api.aa1.cn/doc/ipfs_fileupload.html
+      img2ipfs: {
+        url: "https://api.img2ipfs.org/api/v0/add?pin=false",
+        responseHandler: (data) => ({
+          status: "ok",
+          url: `https://ipfs.io/ipfs/${data.Hash}`,
+          hash: data.Hash,
+        }),
+      },
+
+      // Pinata - 稳定可靠，需要 API Key
+      // 注册: https://pinata.cloud
+      pinata: {
+        url: "https://api.pinata.cloud/pinning/pinFileToIPFS",
+        headers: {
+          // 需要替换为你的 Pinata JWT
+          Authorization: "Bearer YOUR_PINATA_JWT",
+        },
+        responseHandler: (data) => ({
+          status: data.IpfsHash ? "ok" : "error",
+          url: `https://gateway.pinata.cloud/ipfs/${data.IpfsHash}`,
+          hash: data.IpfsHash,
+        }),
+      },
+
+      // Web3.Storage / Storacha - 5GB 免费
+      // 注册: https://storacha.network/
+      web3storage: {
+        url: "https://api.web3.storage/upload",
+        headers: {
+          // 需要替换为你的 API Token
+          Authorization: "Bearer YOUR_WEB3STORAGE_TOKEN",
+        },
+        responseHandler: (data) => ({
+          status: data.cid ? "ok" : "error",
+          url: `https://w3s.link/ipfs/${data.cid}`,
+          hash: data.cid,
+        }),
+      },
+    },
+
+    // 代理配置（用于解决 CORS 问题）
+    proxy: {
+      url: "https://your-worker.your-subdomain.workers.dev",
+      target: "crossbell", // 代理目标
+    },
   };
 
   gsap.to(app, {
@@ -98,45 +154,61 @@ document.addEventListener("DOMContentLoaded", () => {
     xhr.onreadystatechange = () => {
       if (xhr.readyState === XMLHttpRequest.DONE) {
         if (xhr.status === 200) {
-          const data = JSON.parse(xhr.responseText);
-          if (data.status === "ok") {
-            progressTween.kill();
-            gsap.to(fakeProgress, {
-              val: 100,
-              duration: 0.4,
-              onUpdate: () => updateProgress(fakeProgress.val),
-              onComplete: () => {
-                const displayUrl = data.web2url.replace(
-                  "ipfs.crossbell.io",
-                  "ipfs.tianhw.top",
-                );
-                showResult(displayUrl);
-              },
-            });
-          } else {
-            handleError("上传失败");
+          try {
+            const data = JSON.parse(xhr.responseText);
+            const provider = UPLOAD_CONFIG.providers[UPLOAD_CONFIG.provider];
+            const result = provider.responseHandler(data);
+
+            if (result.status === "ok") {
+              progressTween.kill();
+              gsap.to(fakeProgress, {
+                val: 100,
+                duration: 0.4,
+                onUpdate: () => updateProgress(fakeProgress.val),
+                onComplete: () => {
+                  showResult(result.url);
+                },
+              });
+            } else {
+              handleError("上传失败: " + (data.message || "未知错误"));
+            }
+          } catch (e) {
+            handleError("解析响应失败: " + e.message);
           }
         } else {
-          handleError("服务器响应错误");
+          handleError("服务器响应错误: " + xhr.status);
         }
       }
     };
 
     xhr.onerror = () => {
-      // 如果直接上传失败且当前是 direct 模式，提示用户使用代理
-      if (UPLOAD_CONFIG.mode === "direct") {
-        handleError(
-          '上传失败，可能是 CORS 跨域问题。请部署 Cloudflare Worker 代理并修改 UPLOAD_CONFIG.mode 为 "proxy"',
-        );
-      } else {
-        handleError("网络错误");
-      }
+      const currentProvider = UPLOAD_CONFIG.provider;
+      handleError(
+        `上传失败，可能是 CORS 跨域问题。当前使用: ${currentProvider}。请尝试切换其他服务商或部署代理。`,
+      );
     };
-    const uploadUrl =
-      UPLOAD_CONFIG.mode === "proxy"
-        ? UPLOAD_CONFIG.proxy
-        : UPLOAD_CONFIG.direct;
+
+    // 获取上传 URL 和请求头
+    let uploadUrl;
+    let headers = {};
+
+    if (UPLOAD_CONFIG.provider === "proxy") {
+      uploadUrl = UPLOAD_CONFIG.proxy.url;
+    } else {
+      const provider = UPLOAD_CONFIG.providers[UPLOAD_CONFIG.provider];
+      uploadUrl = provider.url;
+      if (provider.headers) {
+        headers = provider.headers;
+      }
+    }
+
     xhr.open("POST", uploadUrl, true);
+
+    // 设置请求头
+    Object.entries(headers).forEach(([key, value]) => {
+      xhr.setRequestHeader(key, value);
+    });
+
     xhr.send(formData);
   }
 
